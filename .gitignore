@@ -1,1 +1,11 @@
-/target
+# IDE and editor
+.vscode
+.idea
+
+**/target
+dist/
+
+# env files for backends
+.env
+
+**/.DS_Store
