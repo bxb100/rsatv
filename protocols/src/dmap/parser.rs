@@ -1,29 +1,36 @@
 use super::tag_definition::Tag::*;
 use super::tag_definition::DMAP_MAP;
+use anyhow::anyhow;
 use nom::bytes::complete::take;
 use nom::combinator::{flat_map, map, map_parser, map_res};
 use nom::multi::many0;
+use nom::number::complete::be_u32;
 use nom::sequence::pair;
 use nom::{IResult, Needed};
 use std::collections::HashMap;
 use std::str::from_utf8;
+use std::usize;
 
 fn key_data(input: &[u8]) -> IResult<&[u8], &str> {
     map_res(take(4usize), from_utf8)(input)
 }
 
-fn read_usize(arr: &[u8]) -> usize {
+fn read_usize(arr: &[u8]) -> anyhow::Result<usize> {
     let mut sum = 0usize;
+
+    if arr.len() > 8 || arr.is_empty() {
+        return Err(anyhow!("Invalid length of array: {}", arr.len()));
+    }
 
     for i in 0..arr.len() {
         sum += (arr[i] as usize) << (8 * (arr.len() - i - 1));
     }
 
-    sum
+    Ok(sum)
 }
 
-fn len_data(input: &[u8]) -> IResult<&[u8], usize> {
-    map(take(4usize), read_usize)(input)
+fn len_data(input: &[u8]) -> IResult<&[u8], u32> {
+    map_parser(take(4usize), be_u32)(input)
 }
 
 #[derive(Debug, PartialEq)]
@@ -35,7 +42,7 @@ pub enum TagType {
     Bytes(Vec<u8>),
 }
 
-fn container_data(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
+fn tag_container(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
     if input.len() < len {
         return Err(nom::Err::Incomplete(Needed::new(len)));
     }
@@ -54,7 +61,7 @@ fn container_data(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], 
     })(input)
 }
 
-fn uint_data(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
+fn tag_unit(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
     if input.len() < len {
         return Err(nom::Err::Incomplete(Needed::new(len)));
     }
@@ -64,11 +71,11 @@ fn uint_data(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (Stri
     }
 
     map(take(len), |bytes| {
-        (tag_name.clone(), TagType::Uint(read_usize(bytes)))
+        (tag_name.clone(), TagType::Uint(read_usize(bytes).unwrap()))
     })(input)
 }
 
-fn string_data(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
+fn tag_string(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
     if input.len() < len {
         return Err(nom::Err::Incomplete(Needed::new(len)));
     }
@@ -91,7 +98,7 @@ fn string_data(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (St
     })(input)
 }
 
-fn bool_data(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
+fn tag_bool(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
     if input.len() < len {
         return Err(nom::Err::Incomplete(Needed::new(len)));
     }
@@ -105,7 +112,7 @@ fn bool_data(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (Stri
     })(input)
 }
 
-fn bytes_data(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
+fn tag_bytes(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (String, TagType)> {
     if input.len() < len {
         return Err(nom::Err::Incomplete(Needed::new(len)));
     }
@@ -123,18 +130,18 @@ fn map_tag_type(tag: String, size: usize) -> impl Fn(&[u8]) -> IResult<&[u8], (S
     let opt_tag_type = DMAP_MAP.get(tag.as_str());
 
     move | input | match opt_tag_type {
-        Some(Uint) => uint_data,
-        Some(Str) => string_data,
-        Some(Dict) => container_data,
-        Some(Data) => bytes_data,
-        Some(Bool) => bool_data,
+        Some(Uint) => tag_unit,
+        Some(Str) => tag_string,
+        Some(Dict) => tag_container,
+        Some(Data) => tag_bytes,
+        Some(Bool) => tag_bool,
         None => panic!("Unknown tag: {}", tag),
     }(tag.clone(), input, size)
 }
 
 pub fn parser(input: &[u8]) -> IResult<&[u8], (String, TagType)> {
     flat_map(pair(key_data, len_data), |(key, len)| {
-        map_tag_type(key.to_string(), len)
+        map_tag_type(key.to_string(), len as usize)
     })(input)
 }
 
@@ -184,7 +191,7 @@ mod test {
     #[test]
     fn test_string_data() {
         let data: &[u8] = b"\x00\x00\x00\x63\x6d\x73\x74";
-        let (r, (_, t)) = string_data("_".to_string(), data, data.len()).unwrap();
+        let (r, (_, t)) = tag_string("_".to_string(), data, data.len()).unwrap();
         assert_eq!(t, TagType::String("cmst".to_string()));
         assert!(r.is_empty());
     }
