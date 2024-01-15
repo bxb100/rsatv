@@ -139,6 +139,28 @@ fn map_tag_type(tag: String, size: usize) -> impl Fn(&[u8]) -> IResult<&[u8], (S
     }(tag.clone(), input, size)
 }
 
+/// ## DMAP Binary Format
+/// doc: https://pyatv.dev/documentation/protocols/#authentication-1
+///
+/// ### TLV (Type-Length-Value)
+///
+/// | key     | length  | value   |
+/// | :---: | :---: | :---: |
+/// | 4 bytes | 4 bytes | n bytes |
+///
+/// ### Tree
+///
+/// ```text
+/// TLV1
+/// |
+/// +---TLV2
+/// |   |
+/// |   + TLV3
+/// |
+/// +---TLV4
+///     |
+///     + TLV5
+/// ```
 pub fn parser(input: &[u8]) -> IResult<&[u8], (String, TagType)> {
     flat_map(pair(key_data, len_data), |(key, len)| {
         map_tag_type(key.to_string(), len as usize)
