@@ -1,5 +1,5 @@
-use crate::dmap::Tag::*;
-use crate::dmap::DMAP_MAP;
+use super::tag_definition::Tag::*;
+use super::tag_definition::DMAP_MAP;
 use nom::bytes::complete::take;
 use nom::combinator::{flat_map, map, map_parser, map_res};
 use nom::multi::many0;
