@@ -55,7 +55,7 @@ fn tag_container(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (
 
     map(inner_content_parser, |tags| {
         (
-            tag_name.clone(),
+            tag_name.to_owned(),
             TagType::Container(tags.into_iter().collect()),
         )
     })(input)
@@ -71,7 +71,10 @@ fn tag_unit(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (Strin
     }
 
     map(take(len), |bytes| {
-        (tag_name.clone(), TagType::Uint(read_usize(bytes).unwrap()))
+        (
+            tag_name.to_owned(),
+            TagType::Uint(read_usize(bytes).unwrap()),
+        )
     })(input)
 }
 
@@ -92,7 +95,7 @@ fn tag_string(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (Str
         }
 
         match String::from_utf8(trim_data.to_vec()) {
-            Ok(s) => Ok((tag_name.clone(), TagType::String(s))),
+            Ok(s) => Ok((tag_name.to_owned(), TagType::String(s))),
             Err(e) => Err(nom::Err::Failure(e)),
         }
     })(input)
@@ -108,7 +111,10 @@ fn tag_bool(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (Strin
     }
 
     map(take(len), |bytes: &[u8]| {
-        (tag_name.clone(), TagType::Bool(bytes.last() == Some(&1u8)))
+        (
+            tag_name.to_owned(),
+            TagType::Bool(bytes.last() == Some(&1u8)),
+        )
     })(input)
 }
 
@@ -122,12 +128,14 @@ fn tag_bytes(tag_name: String, input: &[u8], len: usize) -> IResult<&[u8], (Stri
     }
 
     map(take(len), |bytes: &[u8]| {
-        (tag_name.clone(), TagType::Bytes(bytes.to_vec()))
+        (tag_name.to_owned(), TagType::Bytes(bytes.to_vec()))
     })(input)
 }
 
-fn map_tag_type(tag: String, size: usize) -> impl Fn(&[u8]) -> IResult<&[u8], (String, TagType)> {
-    let opt_tag_type = DMAP_MAP.get(tag.as_str());
+fn map_tag_type(tag: &str, size: usize) -> impl Fn(&[u8]) -> IResult<&[u8], (String, TagType)> {
+    let opt_tag_type = DMAP_MAP.get(tag);
+
+    let tag = tag.to_string();
 
     move | input | match opt_tag_type {
         Some(Uint) => tag_unit,
@@ -136,7 +144,7 @@ fn map_tag_type(tag: String, size: usize) -> impl Fn(&[u8]) -> IResult<&[u8], (S
         Some(Data) => tag_bytes,
         Some(Bool) => tag_bool,
         None => panic!("Unknown tag: {}", tag),
-    }(tag.clone(), input, size)
+    }(tag.to_owned(), input, size)
 }
 
 /// ## DMAP Binary Format
@@ -163,7 +171,7 @@ fn map_tag_type(tag: String, size: usize) -> impl Fn(&[u8]) -> IResult<&[u8], (S
 /// ```
 pub fn parser(input: &[u8]) -> IResult<&[u8], (String, TagType)> {
     flat_map(pair(key_data, len_data), |(key, len)| {
-        map_tag_type(key.to_string(), len as usize)
+        map_tag_type(key, len as usize)
     })(input)
 }
 
@@ -184,7 +192,7 @@ mod test {
 
     #[test]
     fn simple_test_raw_data() {
-        let (remaining, (key, len)) = pair(key_data, len_data)(DATA).unwrap();
+        let (_remaining, (key, len)) = pair(key_data, len_data)(DATA).unwrap();
         assert_eq!(key, "cmst");
         assert_eq!(len, 24);
     }
