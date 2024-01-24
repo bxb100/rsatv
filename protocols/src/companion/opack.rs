@@ -1,13 +1,13 @@
 //! https://pyatv.dev/documentation/protocols/#opack
 
+use nom::{InputTakeAtPosition, IResult};
 use nom::bytes::complete::take;
 use nom::combinator::{map, map_res};
-use nom::number::complete::{le_f32, le_f64, le_u128, le_u16, le_u32, le_u8};
+use nom::number::complete::{be_u8, le_f32, le_f64, le_u128, le_u16, le_u32, le_u8};
 use nom::number::streaming::le_u64;
-use nom::{IResult, InputTakeAtPosition};
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum TypeData<'a> {
     Bool(bool),
     None,
@@ -23,131 +23,42 @@ enum TypeData<'a> {
     Dict(Vec<(TypeData<'a>, TypeData<'a>)>),
 }
 
-impl<'a> PartialEq for TypeData<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        match self {
-            TypeData::Bool(data) => {
-                if let TypeData::Bool(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-            TypeData::None => {
-                matches!(other, TypeData::None)
-            }
-            TypeData::Raw(data) => {
-                if let TypeData::Raw(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-
-            TypeData::Array(data) => {
-                if let TypeData::Array(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-            TypeData::Dict(data) => {
-                if let TypeData::Dict(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-            TypeData::Uuid(data) => {
-                if let TypeData::Uuid(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-            TypeData::Num(dat) => {
-                if let TypeData::Num(other_dat) = other {
-                    dat == other_dat
-                } else {
-                    false
-                }
-            }
-            TypeData::NumU64(data) => {
-                if let TypeData::NumU64(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-            TypeData::NumU128(data) => {
-                if let TypeData::NumU128(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-            TypeData::Float(data) => {
-                if let TypeData::Float(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-            TypeData::Double(data) => {
-                if let TypeData::Double(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-            TypeData::Str(data) => {
-                if let TypeData::Str(other_data) = other {
-                    data == other_data
-                } else {
-                    false
-                }
-            }
-        }
-    }
-}
-
 fn deserializer<'a>(
-    input: &'a [u8],
-    object_list: &mut Vec<TypeData<'a>>,
+    input: &'a [u8], object_list: &mut Vec<TypeData<'a>>,
 ) -> IResult<&'a [u8], TypeData<'a>> {
     let mut add_to_object_list = true;
 
-    let data = match input[0] {
+    let (input, tag) = be_u8(input)?;
+
+    let data = match tag {
         0x01 => {
             add_to_object_list = false;
-            Ok((&input[1..], TypeData::Bool(true)))
+            Ok((input, TypeData::Bool(true)))
         }
         0x02 => {
             add_to_object_list = false;
-            Ok((&input[1..], TypeData::Bool(false)))
+            Ok((input, TypeData::Bool(false)))
         }
         0x04 => {
             add_to_object_list = false;
-            Ok((&input[1..], TypeData::None))
+            Ok((input, TypeData::None))
         }
         0x05 => {
-            let input = &input[1..];
             map_res(take(16usize), |slice| {
                 Uuid::from_slice(slice).map(TypeData::Uuid)
             })(input)
         }
         0x06 => {
             // TODO: source code logical only parse as integer
-            map(le_u64, TypeData::NumU64)(&input[1..])
+            map(le_u64, TypeData::NumU64)(input)
         }
         data @ 0x08..=0x2F => {
             add_to_object_list = false;
-            Ok((&input[1..], TypeData::Num(data as u32)))
+            Ok((input, TypeData::Num(data as u32)))
         }
         // 0x30 0x31 0x32 0x33 0x34
         data if data & 0xF0 == 0x30 => {
             let no_of_bytes = 2 ^ (data & 0x0F);
-            let input = &input[1..];
             match no_of_bytes {
                 1 => map(le_u8, |num| TypeData::Num(num as u32))(input),
                 2 => map(le_u16, |num| TypeData::Num(num as u32))(input),
@@ -163,21 +74,18 @@ fn deserializer<'a>(
             }
         }
         0x35 => {
-            let input = &input[1..];
             map(le_f32, TypeData::Float)(input)
         }
         0x36 => {
-            let input = &input[1..];
             map(le_f64, TypeData::Double)(input)
         }
         data @ 0x40..=0x60 => {
             let len = data - 0x40;
             map_res(take(len as usize), |slice| {
                 std::str::from_utf8(slice).map(TypeData::Str)
-            })(&input[1..])
+            })(input)
         }
         data @ 0x61..=0x64 => {
-            let input = &input[1..];
             let no_of_bytes: usize = (data & 0xF) as usize;
             let len = usize::from_le_bytes(input[..no_of_bytes].try_into().unwrap());
 
@@ -187,7 +95,6 @@ fn deserializer<'a>(
         }
         // null terminated string
         0x6F => {
-            let input = &input[1..];
             let (remaining, data) = input.split_at_position(|item| item == 0x00)?;
             Ok((
                 // remove `0x00`
@@ -197,11 +104,10 @@ fn deserializer<'a>(
         }
         data @ 0x70..=0x90 => {
             let len = data - 0x70;
-            map(take(len as usize), TypeData::Raw)(&input[1..])
+            map(take(len as usize), TypeData::Raw)(input)
         }
         data @ 0x91..=0x94 => {
             let no_of_bytes = (data & 0xF) as usize;
-            let input = &input[1..];
             let len = usize::from_le_bytes(input[..no_of_bytes].try_into().unwrap());
             Ok((
                 &input[no_of_bytes + len..],
@@ -211,7 +117,7 @@ fn deserializer<'a>(
         // array with v elements
         data if data & 0xD0 == 0xD0 => {
             let v = data & 0x0F;
-            let mut ptr = &input[1..];
+            let mut ptr = input;
             let mut output: Vec<TypeData> = Vec::new();
             if v == 0xF {
                 // endless list
@@ -236,7 +142,7 @@ fn deserializer<'a>(
         data if data & 0xE0 == 0xE0 => {
             let v = data & 0xF;
             let mut output: Vec<(TypeData, TypeData)> = Vec::new();
-            let mut ptr = &input[1..];
+            let mut ptr = input;
             if v == 0xF {
                 // endless list
                 while ptr[0] != 0x03 {
@@ -259,10 +165,9 @@ fn deserializer<'a>(
             Ok((ptr, TypeData::Dict(output)))
         }
         // pointer
-        data @ 0xA0..=0xC0 => Ok((&input[1..], object_list[(data & 0x1F) as usize].clone())),
+        data @ 0xA0..=0xC0 => Ok((input, object_list[(data & 0x1F) as usize].clone())),
         data @ 0xC1..=0xC4 => {
             let len = (data - 0xC0) as usize;
-            let input = &input[1..];
             let uid = usize::from_le_bytes(input[..len].try_into().unwrap());
             Ok((input, object_list[uid].clone()))
         }
