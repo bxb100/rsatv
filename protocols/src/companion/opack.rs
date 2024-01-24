@@ -7,7 +7,7 @@ use nom::number::streaming::le_u64;
 use nom::{IResult, InputTakeAtPosition};
 use uuid::Uuid;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum TypeData<'a> {
     Bool(bool),
     None,
@@ -21,25 +21,6 @@ enum TypeData<'a> {
     Raw(&'a [u8]),
     Array(Vec<TypeData<'a>>),
     Dict(Vec<(TypeData<'a>, TypeData<'a>)>),
-}
-
-impl<'a> Clone for TypeData<'a> {
-    fn clone(&self) -> Self {
-        match self {
-            TypeData::Bool(data) => TypeData::Bool(*data),
-            TypeData::None => TypeData::None,
-            TypeData::Uuid(data) => TypeData::Uuid(*data),
-            TypeData::Num(data) => TypeData::Num(*data),
-            TypeData::NumU64(data) => TypeData::NumU64(*data),
-            TypeData::NumU128(data) => TypeData::NumU128(*data),
-            TypeData::Float(data) => TypeData::Float(*data),
-            TypeData::Double(data) => TypeData::Double(*data),
-            TypeData::Str(data) => TypeData::Str(data),
-            TypeData::Raw(data) => TypeData::Raw(data),
-            TypeData::Array(data) => TypeData::Array(data.clone()),
-            TypeData::Dict(data) => TypeData::Dict(data.clone()),
-        }
-    }
 }
 
 impl<'a> PartialEq for TypeData<'a> {
