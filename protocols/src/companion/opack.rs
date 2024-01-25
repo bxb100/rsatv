@@ -207,7 +207,7 @@ fn _deserializer<'a>(
 }
 
 #[cfg(test)]
-mod serialize_test {
+mod deserialize_test {
     use uuid::Uuid;
 
     use super::{_deserializer, deserializer, TypeData};
@@ -390,4 +390,9 @@ mod serialize_test {
             ])
         )
     }
+}
+
+#[cfg(test)]
+mod serialize_test {
+
 }
