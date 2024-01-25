@@ -8,9 +8,10 @@ use nom::number::streaming::le_u64;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq)]
-enum TypeData<'a> {
+pub enum TypeData<'a> {
     Bool(bool),
     None,
+    NegativeOne,
     Uuid(Uuid),
     Num(u32),
     NumU64(u64),
@@ -23,7 +24,22 @@ enum TypeData<'a> {
     Dict(Vec<(TypeData<'a>, TypeData<'a>)>),
 }
 
-fn deserializer<'a>(
+fn read_index(input: &[u8]) -> usize {
+    // maximum 4 bytes, so we can safely cast to usize(32/64 bits)
+    let mut res = 0usize;
+    let bound = input.len();
+
+    for i in 0..bound {
+        res = (res << 8) + input[bound - i - 1] as usize;
+    }
+    res
+}
+
+pub fn deserializer(input: &[u8]) -> IResult<&[u8], TypeData> {
+    _deserializer(input, &mut Vec::new())
+}
+
+fn _deserializer<'a>(
     input: &'a [u8], object_list: &mut Vec<TypeData<'a>>,
 ) -> IResult<&'a [u8], TypeData<'a>> {
     let mut add_to_object_list = true;
@@ -52,13 +68,17 @@ fn deserializer<'a>(
             // TODO: source code logical only parse as integer
             map(le_u64, TypeData::NumU64)(input)
         }
+        0x07 => {
+            add_to_object_list = false;
+            Ok((input, TypeData::NegativeOne))
+        }
         data @ 0x08..=0x2F => {
             add_to_object_list = false;
-            Ok((input, TypeData::Num(data as u32)))
+            Ok((input, TypeData::Num((data - 0x08) as u32)))
         }
         // 0x30 0x31 0x32 0x33 0x34
         data if data & 0xF0 == 0x30 => {
-            let no_of_bytes = 2 ^ (data & 0x0F);
+            let no_of_bytes = 2u8.pow((data & 0xF) as u32);
             match no_of_bytes {
                 1 => map(le_u8, |num| TypeData::Num(num as u32))(input),
                 2 => map(le_u16, |num| TypeData::Num(num as u32))(input),
@@ -87,7 +107,7 @@ fn deserializer<'a>(
         }
         data @ 0x61..=0x64 => {
             let no_of_bytes: usize = (data & 0xF) as usize;
-            let len = usize::from_le_bytes(input[..no_of_bytes].try_into().unwrap());
+            let len = read_index(&input[..no_of_bytes]);
 
             map_res(take(len), |slice| {
                 std::str::from_utf8(slice).map(TypeData::Str)
@@ -108,11 +128,9 @@ fn deserializer<'a>(
         }
         data @ 0x91..=0x94 => {
             let no_of_bytes = (data & 0xF) as usize;
-            let len = usize::from_le_bytes(input[..no_of_bytes].try_into().unwrap());
-            Ok((
-                &input[no_of_bytes + len..],
-                TypeData::Raw(&input[no_of_bytes..no_of_bytes + len]),
-            ))
+            let len = read_index(&input[..no_of_bytes]);
+            let (raw, remaining) = input[no_of_bytes..].split_at(len);
+            Ok((remaining, TypeData::Raw(raw)))
         }
         // array with v elements
         data if data & 0xD0 == 0xD0 => {
@@ -122,7 +140,7 @@ fn deserializer<'a>(
             if v == 0xF {
                 // endless list
                 while ptr[0] != 0x03 {
-                    let (remaining, data) = deserializer(ptr, object_list)?;
+                    let (remaining, data) = _deserializer(ptr, object_list)?;
                     output.push(data);
                     ptr = remaining;
                 }
@@ -130,7 +148,7 @@ fn deserializer<'a>(
                 ptr = &ptr[1..];
             } else {
                 for _ in 0..v {
-                    let (remaining, data) = deserializer(ptr, object_list)?;
+                    let (remaining, data) = _deserializer(ptr, object_list)?;
                     output.push(data);
                     ptr = remaining;
                 }
@@ -146,8 +164,8 @@ fn deserializer<'a>(
             if v == 0xF {
                 // endless list
                 while ptr[0] != 0x03 {
-                    let (remaining, key) = deserializer(ptr, object_list)?;
-                    let (remaining, value) = deserializer(remaining, object_list)?;
+                    let (remaining, key) = _deserializer(ptr, object_list)?;
+                    let (remaining, value) = _deserializer(remaining, object_list)?;
                     output.push((key, value));
                     ptr = remaining;
                 }
@@ -155,8 +173,8 @@ fn deserializer<'a>(
                 ptr = &ptr[1..];
             } else {
                 for _ in 0..v {
-                    let (remaining, key) = deserializer(ptr, object_list)?;
-                    let (remaining, value) = deserializer(remaining, object_list)?;
+                    let (remaining, key) = _deserializer(ptr, object_list)?;
+                    let (remaining, value) = _deserializer(remaining, object_list)?;
                     output.push((key, value));
                     ptr = remaining;
                 }
@@ -168,7 +186,7 @@ fn deserializer<'a>(
         data @ 0xA0..=0xC0 => Ok((input, object_list[(data & 0x1F) as usize].clone())),
         data @ 0xC1..=0xC4 => {
             let len = (data - 0xC0) as usize;
-            let uid = usize::from_le_bytes(input[..len].try_into().unwrap());
+            let uid = read_index(&input[..len]);
             Ok((input, object_list[uid].clone()))
         }
         _ => {
@@ -189,32 +207,179 @@ fn deserializer<'a>(
 }
 
 #[cfg(test)]
-mod test {
-    use crate::companion::opack::{deserializer, TypeData};
+mod serialize_test {
+    use uuid::Uuid;
 
+    use super::{_deserializer, deserializer, TypeData};
+
+    /// ```plain
+    /// EF    : Endless dict
+    /// 41 61 : "a"
+    /// 41 62 : "b"
+    /// 03    : Terminates previous dict
+    /// ```
+    #[test]
+    fn test_termination() {
+        let input = b"\xEF\x41\x61\x41\x62\x03";
+
+        let (_, data) = deserializer(input).unwrap();
+
+        if let TypeData::Dict(data) = data {
+            assert_eq!(data.len(), 1);
+            assert_eq!(data[0].0, TypeData::Str("a"));
+            assert_eq!(data[0].1, TypeData::Str("b"));
+        } else {
+            panic!("Expected dict");
+        }
+    }
+
+    /// ```plain
+    /// 05                                                 : UUID
+    /// 12 34 56 78 12 12 34 56 78 12 34 56 78 12 34 56 78 : 12345678-1234-5678-1234-567812345678
+    /// ```
+    ///
+    /// don't know `<CFUUID 0x600002af2e80>` yet
+    #[test]
+    fn test_uuid() {
+        // 05 : UUID
+        let input = b"\x05\x12\x34\x56\x78\x12\x34\x56\x78\x12\x34\x56\x78\x12\x34\x56\x78";
+
+        let (_, data) = deserializer(input).unwrap();
+
+        assert_eq!(
+            data,
+            TypeData::Uuid(Uuid::parse_str("12345678-1234-5678-1234-567812345678").unwrap())
+        );
+    }
+
+    ///```plain
+    /// 07                         : -1
+    /// 17                         : 15
+    /// 30 20                      : 32
+    /// 31 20 00                   : 32
+    /// 32 20 00 00 00             : 32
+    /// 33 20 00 00 00 00 00 00 00 : 32
+    /// ```
+    #[test]
+    fn test_num() {
+        let input = b"\x07\x17\x30\x20\x31\x20\x00\x32\x20\x00\x00\x00\x33\x20\x00\x00\x00\x00\x00\x00\x00";
+        let mut vec: Vec<TypeData> = Vec::new();
+
+        let (remaining, data) = _deserializer(input, &mut vec).unwrap();
+        matches!(data, TypeData::NegativeOne);
+
+        let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
+        if let TypeData::Num(data) = data {
+            assert_eq!(data, 15);
+        } else {
+            panic!("Expected Num");
+        }
+
+        let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
+        if let TypeData::Num(data) = data {
+            assert_eq!(data, 32);
+        } else {
+            panic!("Expected Num");
+        }
+
+        let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
+        if let TypeData::Num(data) = data {
+            assert_eq!(data, 32);
+        } else {
+            panic!("Expected Num");
+        }
+
+        let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
+        if let TypeData::Num(data) = data {
+            assert_eq!(data, 32);
+        } else {
+            panic!("Expected Num");
+        }
+
+        let (_, data) = _deserializer(remaining, &mut vec).unwrap();
+        if let TypeData::NumU64(data) = data {
+            assert_eq!(data, 32);
+        } else {
+            panic!("Expected Num");
+        }
+    }
+
+    /// ```plain
+    /// 72             : AA BB
+    /// 91 02          : AA BB
+    /// 92 02 00       : AA BB
+    /// 93 02 00 00    : AA BB
+    /// 94 02 00 00 00 : AA BB
+    /// ```
+    #[test]
+    fn test_raw() {
+        let input = b"\x72\xAA\xBB\x91\x02\xAA\xBB\x92\x02\x00\xAA\xBB\x93\x02\x00\x00\xAA\xBB\x94\x02\x00\x00\x00\xAA\xBB";
+
+        let mut vec: Vec<TypeData> = Vec::new();
+
+        let (remaining, data) = _deserializer(input, &mut vec).unwrap();
+        if let TypeData::Raw(data) = data {
+            assert_eq!(data, &[0xAA, 0xBB]);
+        } else {
+            panic!("Expected raw");
+        }
+
+        let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
+        if let TypeData::Raw(data) = data {
+            assert_eq!(data, &[0xAA, 0xBB]);
+        } else {
+            panic!("Expected raw");
+        }
+
+        let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
+        if let TypeData::Raw(data) = data {
+            assert_eq!(data, &[0xAA, 0xBB]);
+        } else {
+            panic!("Expected raw");
+        }
+
+        let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
+        if let TypeData::Raw(data) = data {
+            assert_eq!(data, &[0xAA, 0xBB]);
+        } else {
+            panic!("Expected raw");
+        }
+
+        let (_, data) = _deserializer(remaining, &mut vec).unwrap();
+        if let TypeData::Raw(data) = data {
+            assert_eq!(data, &[0xAA, 0xBB]);
+        } else {
+            panic!("Expected raw");
+        }
+    }
+
+    /// ```plain
+    /// DF    : Endless list
+    /// 41 61 : "a"
+    /// 03    : Terminates previous list (or dict)
+    /// ```
     #[test]
     fn test_endless_collections() {
-        // DF    : Endless list
-        // 41 61 : "a"
-        // 03    : Terminates previous list (or dict)
         let input = b"\xDF\x41\x61\x03";
 
-        let (_, data) = deserializer(input, &mut Vec::new()).unwrap();
+        let (_, data) = deserializer(input).unwrap();
         assert_eq!(data, TypeData::Array(vec![TypeData::Str("a")]));
     }
 
+    /// ```plain
+    /// E3          : Dictionary with three items
+    /// 41 61       : "a"
+    /// 02          : False
+    /// 41 62       : "b"
+    /// 44 74657374 : "test"
+    /// 41 63       : "c"
+    /// A2          : Pointer, index=2
+    /// ```
     #[test]
     fn test_pointer() {
-        // E3          : Dictionary with three items
-        // 41 61       : "a"
-        // 02          : False
-        // 41 62       : "b"
-        // 44 74657374 : "test"
-        // 41 63       : "c"
-        // A2          : Pointer, index=2
         let input = b"\xE3\x41\x61\x02\x41\x62\x44\x74\x65\x73\x74\x41\x63\xA2";
 
-        let (_, data) = deserializer(input, &mut Vec::new()).unwrap();
+        let (_, data) = deserializer(input).unwrap();
 
         assert_eq!(
             data,
