@@ -1,8 +1,6 @@
 //! https://pyatv.dev/documentation/protocols/#opack
 
-use std::ops::Index;
-
-use nom::{AsBytes, InputTakeAtPosition, IResult};
+use nom::{InputTakeAtPosition, IResult};
 use nom::bytes::complete::take;
 use nom::combinator::{map, map_res};
 use nom::number::complete::{be_u8, le_f32, le_f64, le_u128, le_u16, le_u32, le_u8};
@@ -235,7 +233,7 @@ macro_rules! impl_convert_to_bytes {
 
 impl_convert_to_bytes!(u8, 0x30, u16, 0x31, u32, 0x32, u64, 0x33, u128, 0x34, f32, 0x35, f64, 0x36);
 
-fn _serializer<'a>(data: TypeData<'a>, object_list: &mut Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
+fn _serializer(data: TypeData, object_list: &mut Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
     let mut bytes: Vec<u8> = match data {
         TypeData::Bool(data) => {
             if data {
@@ -579,5 +577,36 @@ mod serialize_test {
         ]);
         let bytes = serializer(input).unwrap();
         assert_eq!(bytes, b"\xE3\x41\x61\x02\x41\x62\x44\x74\x65\x73\x32\x41\x63\xA2");
+    }
+
+    #[test]
+    fn test_num() {
+        let input = TypeData::NegativeOne;
+        let bytes = serializer(input).unwrap();
+        assert_eq!(bytes, b"\x07");
+
+        let input = TypeData::Num(15);
+        let bytes = serializer(input).unwrap();
+        assert_eq!(bytes, b"\x17");
+
+        let input = TypeData::NumU8(32);
+        let bytes = serializer(input).unwrap();
+        assert_eq!(bytes, b"\x30\x20");
+
+        let input = TypeData::NumU16(32);
+        let bytes = serializer(input).unwrap();
+        assert_eq!(bytes, b"\x31\x20\x00");
+
+        let input = TypeData::NumU32(32);
+        let bytes = serializer(input).unwrap();
+        assert_eq!(bytes, b"\x32\x20\x00\x00\x00");
+
+        let input = TypeData::NumU64(32);
+        let bytes = serializer(input).unwrap();
+        assert_eq!(bytes, b"\x33\x20\x00\x00\x00\x00\x00\x00\x00");
+
+        let input = TypeData::NumU128(32);
+        let bytes = serializer(input).unwrap();
+        assert_eq!(bytes, b"\x34\x20\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00");
     }
 }
