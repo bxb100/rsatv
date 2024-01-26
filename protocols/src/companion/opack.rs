@@ -1,6 +1,8 @@
 //! https://pyatv.dev/documentation/protocols/#opack
 
-use nom::{InputTakeAtPosition, IResult};
+use std::ops::Index;
+
+use nom::{AsBytes, InputTakeAtPosition, IResult};
 use nom::bytes::complete::take;
 use nom::combinator::{map, map_res};
 use nom::number::complete::{be_u8, le_f32, le_f64, le_u128, le_u16, le_u32, le_u8};
@@ -13,7 +15,10 @@ pub enum TypeData<'a> {
     None,
     NegativeOne,
     Uuid(Uuid),
-    Num(u32),
+    Num(u8),
+    NumU8(u8),
+    NumU16(u16),
+    NumU32(u32),
     NumU64(u64),
     NumU128(u128),
     Float(f32),
@@ -74,15 +79,15 @@ fn _deserializer<'a>(
         }
         data @ 0x08..=0x2F => {
             add_to_object_list = false;
-            Ok((input, TypeData::Num((data - 0x08) as u32)))
+            Ok((input, TypeData::Num(data - 0x08)))
         }
         // 0x30 0x31 0x32 0x33 0x34
         data if data & 0xF0 == 0x30 => {
             let no_of_bytes = 2u8.pow((data & 0xF) as u32);
             match no_of_bytes {
-                1 => map(le_u8, |num| TypeData::Num(num as u32))(input),
-                2 => map(le_u16, |num| TypeData::Num(num as u32))(input),
-                4 => map(le_u32, TypeData::Num)(input),
+                1 => map(le_u8, TypeData::NumU8)(input),
+                2 => map(le_u16, TypeData::NumU16)(input),
+                4 => map(le_u32, TypeData::NumU32)(input),
                 8 => map(le_u64, TypeData::NumU64)(input),
                 16 => map(le_u128, TypeData::NumU128)(input),
                 _ => {
@@ -206,6 +211,168 @@ fn _deserializer<'a>(
     data
 }
 
+trait ConvertToBytes {
+    fn to_bytes(&self) -> Vec<u8>;
+}
+
+macro_rules! impl_convert_to_bytes {
+    ($type:ident, $header:literal) => {
+        impl ConvertToBytes for $type {
+            fn to_bytes(&self) -> Vec<u8> {
+                let mut bytes = vec![$header];
+                bytes.extend_from_slice(&self.to_le_bytes());
+                bytes
+            }
+        }
+    };
+
+    ($($type:ident, $header:literal),*) => {
+        $(
+        impl_convert_to_bytes!($type, $header);
+        )*
+    };
+}
+
+impl_convert_to_bytes!(u8, 0x30, u16, 0x31, u32, 0x32, u64, 0x33, u128, 0x34, f32, 0x35, f64, 0x36);
+
+fn _serializer<'a>(data: TypeData<'a>, object_list: &mut Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
+    let mut bytes: Vec<u8> = match data {
+        TypeData::Bool(data) => {
+            if data {
+                vec![0x01]
+            } else {
+                vec![0x02]
+            }
+        }
+        TypeData::None => vec![0x04],
+        TypeData::NegativeOne => vec![0x07],
+        TypeData::Uuid(data) => {
+            let mut bytes = vec![0x05];
+            bytes.extend_from_slice(data.as_bytes());
+            bytes
+        }
+        TypeData::Num(data) => {
+            vec![data + 0x08]
+        }
+        TypeData::NumU8(data) => data.to_bytes(),
+        TypeData::NumU16(data) => data.to_bytes(),
+        TypeData::NumU32(data) => data.to_bytes(),
+        TypeData::NumU64(data) => data.to_bytes(),
+        TypeData::NumU128(data) => data.to_bytes(),
+        TypeData::Float(data) => data.to_bytes(),
+        TypeData::Double(data) => data.to_bytes(),
+        TypeData::Str(data) => {
+            let str_bytes = data.as_bytes();
+            let len = str_bytes.len();
+            let mut bytes: Vec<u8> = Vec::new();
+            if len <= 0x20 {
+                bytes.push(0x40 + len as u8);
+            } else if len <= 0xFF {
+                bytes.push(0x61);
+                // 1 byte
+                bytes.extend_from_slice(&(len as u8).to_le_bytes());
+            } else if len <= 0xFFFF {
+                bytes.push(0x62);
+                // 2 bytes
+                bytes.extend_from_slice(&(len as u16).to_le_bytes());
+            } else if len <= 0xFFFFFF {
+                bytes.push(0x63);
+                // 3 bytes
+                bytes.extend_from_slice(&(len as u32).to_le_bytes()[..3]);
+            } else if len <= 0xFFFFFFFF {
+                bytes.push(0x64);
+                // 4 bytes
+                bytes.extend_from_slice(&(len as u32).to_le_bytes());
+            } else {
+                return Err(anyhow::anyhow!("String too long"));
+            }
+            bytes.extend_from_slice(str_bytes);
+            bytes
+        }
+        TypeData::Raw(data) => {
+            let mut bytes: Vec<u8> = Vec::new();
+            let len = data.len();
+            if len <= 0x20 {
+                bytes.push(0x70 + len as u8);
+            } else if len <= 0xFF {
+                bytes.push(0x91);
+                // 1 byte
+                bytes.extend_from_slice(&(len as u8).to_le_bytes());
+            } else if len <= 0xFFFF {
+                bytes.push(0x92);
+                // 2 bytes
+                bytes.extend_from_slice(&(len as u16).to_le_bytes());
+            } else if len <= 0xFFFFFF {
+                bytes.push(0x93);
+                // 3 bytes
+                bytes.extend_from_slice(&(len as u32).to_le_bytes()[..3]);
+            } else if len <= 0xFFFFFFFF {
+                bytes.push(0x94);
+                // 4 bytes
+                bytes.extend_from_slice(&(len as u32).to_le_bytes());
+            } else {
+                return Err(anyhow::anyhow!("Bytes too long"));
+            }
+            bytes.extend_from_slice(data);
+            bytes
+        }
+        TypeData::Array(data) => {
+            let data_len = data.len();
+            let len = data_len.min(0xF);
+            let mut bytes: Vec<u8> = vec![0xD0 + len as u8];
+            for item in data {
+                bytes.extend(_serializer(item, object_list)?);
+            }
+            if data_len >= 0xF {
+                bytes.push(0x03);
+            }
+            bytes
+        }
+        TypeData::Dict(data) => {
+            let data_len = data.len();
+            let len = data_len.min(0xF);
+            let mut bytes = vec![0xE0 + len as u8];
+            for (key, value) in data {
+                bytes.extend(_serializer(key, object_list)?);
+                bytes.extend(_serializer(value, object_list)?);
+            }
+            if data_len >= 0xF {
+                bytes.push(0x03);
+            }
+            bytes
+        }
+    };
+
+    // reuse if in object list, otherwise add it to object list
+    if let Some(index) = object_list.iter().position(|item| item == &bytes) {
+        if index <= 0x20 {
+            bytes = vec![0xA0 + index as u8];
+        } else if index <= 0xFF {
+            bytes = vec![0xC1, index as u8];
+        } else if index <= 0xFFFF {
+            bytes = vec![0xC2];
+            bytes.extend_from_slice(&(index as u16).to_le_bytes());
+            // fixme: it different from python implementation
+        } else if index <= 0xFFFFFF {
+            bytes = vec![0xC3];
+            bytes.extend_from_slice(&(index as u32).to_le_bytes()[..3]);
+        } else if index <= 0xFFFFFFFF {
+            bytes = vec![0xC4];
+            bytes.extend_from_slice(&(index as u32).to_le_bytes());
+        } else {
+            return Err(anyhow::anyhow!("Object list too long"));
+        }
+    } else if bytes.len() > 1 {
+        object_list.push(bytes.clone());
+    }
+
+    Ok(bytes)
+}
+
+pub fn serializer(data: TypeData) -> anyhow::Result<Vec<u8>> {
+    _serializer(data, &mut Vec::new())
+}
+
 #[cfg(test)]
 mod deserialize_test {
     use uuid::Uuid;
@@ -276,31 +443,31 @@ mod deserialize_test {
         }
 
         let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
-        if let TypeData::Num(data) = data {
+        if let TypeData::NumU8(data) = data {
             assert_eq!(data, 32);
         } else {
-            panic!("Expected Num");
+            panic!("Expected NumU8");
         }
 
         let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
-        if let TypeData::Num(data) = data {
+        if let TypeData::NumU16(data) = data {
             assert_eq!(data, 32);
         } else {
-            panic!("Expected Num");
+            panic!("Expected NumU16");
         }
 
         let (remaining, data) = _deserializer(remaining, &mut vec).unwrap();
-        if let TypeData::Num(data) = data {
+        if let TypeData::NumU32(data) = data {
             assert_eq!(data, 32);
         } else {
-            panic!("Expected Num");
+            panic!("Expected NumU32");
         }
 
         let (_, data) = _deserializer(remaining, &mut vec).unwrap();
         if let TypeData::NumU64(data) = data {
             assert_eq!(data, 32);
         } else {
-            panic!("Expected Num");
+            panic!("Expected NumU64");
         }
     }
 
@@ -394,5 +561,23 @@ mod deserialize_test {
 
 #[cfg(test)]
 mod serialize_test {
+    use super::{serializer, TypeData};
 
+    #[test]
+    fn test_string() {
+        let input = "test";
+        let bytes = serializer(TypeData::Str(input)).unwrap();
+        assert_eq!(bytes, b"\x44\x74\x65\x73\x74");
+    }
+
+    #[test]
+    fn test_dict_and_pointer() {
+        let input = TypeData::Dict(vec![
+            (TypeData::Str("a"), TypeData::Bool(false)),
+            (TypeData::Str("b"), TypeData::Str("tes2")),
+            (TypeData::Str("c"), TypeData::Str("tes2")),
+        ]);
+        let bytes = serializer(input).unwrap();
+        assert_eq!(bytes, b"\xE3\x41\x61\x02\x41\x62\x44\x74\x65\x73\x32\x41\x63\xA2");
+    }
 }
