@@ -224,14 +224,14 @@ macro_rules! impl_convert_to_bytes {
         }
     };
 
-    ($($type:ident, $header:literal),*) => {
+    ($(($type:ident, $header:literal)),*) => {
         $(
         impl_convert_to_bytes!($type, $header);
         )*
     };
 }
 
-impl_convert_to_bytes!(u8, 0x30, u16, 0x31, u32, 0x32, u64, 0x33, u128, 0x34, f32, 0x35, f64, 0x36);
+impl_convert_to_bytes!((u8, 0x30), (u16, 0x31), (u32, 0x32), (u64, 0x33), (u128, 0x34), (f32, 0x35), (f64, 0x36));
 
 fn _serializer(data: TypeData, object_list: &mut Vec<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
     let mut bytes: Vec<u8> = match data {
