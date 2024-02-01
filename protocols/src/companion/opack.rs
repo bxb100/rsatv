@@ -200,7 +200,7 @@ fn _deserializer<'a>(
         }
     };
 
-    if let Ok((_, value)) = &data {
+    if let Ok((_, ref value)) = data {
         if add_to_object_list && !object_list.contains(value) {
             object_list.push(value.clone());
         }
